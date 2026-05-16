@@ -32,9 +32,16 @@ def _safe(val, default=0.0):
         return default
 
 def _find_col(df, *keywords, exclude=None):
-    """Cari kolom yang mengandung semua keyword (case-insensitive)."""
+    """
+    Cari kolom yang mengandung semua keyword (case-insensitive).
+    Normalisasi newline dan bracket keterangan sebelum matching,
+    supaya kolom seperti 'Stok Awal\nCoal (ton)\n[isi hari-1]' tetap terdeteksi.
+    """
+    import re as _re
     for c in df.columns:
-        cs = str(c).lower()
+        cs = _re.sub(r'\[.*?\]', ' ', str(c))
+        cs = _re.sub(r'[\n\r]+', ' ', cs)
+        cs = _re.sub(r'\s+', ' ', cs).strip().lower()
         if all(k.lower() in cs for k in keywords):
             if exclude and any(e.lower() in cs for e in exclude):
                 continue
