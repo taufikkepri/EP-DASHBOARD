@@ -67,6 +67,38 @@ def load_harian(src=None) -> pd.DataFrame:
     df = df.dropna(subset=[df.columns[0]])
     df = df[~df[df.columns[0]].astype(str).str.startswith(("⬆","Tanggal","nan"))]
 
+    # ── Deteksi format stok — 2 kemungkinan format Excel:
+    # Format A (template ane): kolom "Stok Awal" dan "Stok Akhir" terpisah
+    # Format B (format user):  hanya kolom "Stok Coal/HSD/Bio" (= stok akhir, awal dihitung)
+    def _stok(fuel, mode):
+        if mode == "awal":
+            # Cari kolom yang ada kata "stok" + "awal" + nama fuel
+            return _find_col(df, "stok", "awal", fuel)
+        else:
+            # Cari kolom stok akhir:
+            # Format A: "Stok Akhir Coal" → keyword "stok","akhir","fuel"
+            # Format B: "Stok Coal [otomatis]" → keyword "stok","fuel" exclude "awal"
+            col = _find_col(df, "stok", "akhir", fuel)
+            if col:
+                return col
+            # Format B: pakai exclude awal supaya tidak keambil kolom stok awal
+            return _find_col(df, "stok", fuel, exclude=["awal"])
+
+    # Deteksi satuan HSD — bisa kL atau L (liter)
+    hsd_stk_col = _stok("hsd", "akhir")
+    hsd_con_col = _find_col(df, "konsumsi", "hsd")
+    hsd_rcv_col = _find_col(df, "penerimaan", "hsd")
+    _hsd_is_liter = False
+    for _c in [hsd_stk_col, hsd_con_col, hsd_rcv_col]:
+        if _c and "(l)" in str(_c).lower() and "kl" not in str(_c).lower():
+            _hsd_is_liter = True
+            break
+
+    # Deteksi satuan Produksi — MWh atau kWh
+    prod_col = _find_col(df, "produksi", "netto") or _find_col(df, "produksi")
+    _prod_is_kwh = bool(prod_col and "kwh" in str(prod_col).lower()
+                        and "mwh" not in str(prod_col).lower())
+
     # Rename kolom ke key standar
     col_map = {
         _find_col(df, "tanggal"):             "tanggal",
@@ -74,28 +106,93 @@ def load_harian(src=None) -> pd.DataFrame:
         # Coal
         _find_col(df, "penerimaan", "coal"):  "coal_rcv",
         _find_col(df, "konsumsi", "coal"):    "coal_con",
-        _find_col(df, "stok", "awal", "coal"):"coal_stok_awal",
-        _find_col(df, "stok", "akhir", "coal", exclude=["awal"]): "coal_stok_akhir",
+        _stok("coal", "awal"):                "coal_stok_awal",
+        _stok("coal", "akhir"):               "coal_stok_akhir",
         _find_col(df, "gcv"):                 "gcv",
         _find_col(df, "nilai", "kalor", "coal"): "coal_kal",
         # HSD
-        _find_col(df, "penerimaan", "hsd"):   "hsd_rcv",
-        _find_col(df, "konsumsi", "hsd"):     "hsd_con",
-        _find_col(df, "stok", "awal", "hsd"): "hsd_stok_awal",
-        _find_col(df, "stok", "akhir", "hsd", exclude=["awal"]): "hsd_stok_akhir",
+        hsd_rcv_col:                          "hsd_rcv",
+        hsd_con_col:                          "hsd_con",
+        _stok("hsd", "awal"):                 "hsd_stok_awal",
+        hsd_stk_col:                          "hsd_stok_akhir",
         # Biomassa
         _find_col(df, "penerimaan", "bio"):   "bio_rcv",
         _find_col(df, "konsumsi", "bio"):     "bio_con",
-        _find_col(df, "stok", "awal", "bio"): "bio_stok_awal",
-        _find_col(df, "stok", "akhir", "bio", exclude=["awal"]): "bio_stok_akhir",
+        _stok("bio", "awal"):                 "bio_stok_awal",
+        _stok("bio", "akhir"):                "bio_stok_akhir",
         # Produksi
-        _find_col(df, "produksi", "netto"):   "produksi",
+        prod_col:                             "produksi",
         _find_col(df, "beban", "rerata"):     "beban",
         _find_col(df, "heat", "rate"):        "heat_rate",
         _find_col(df, "sfc"):                 "sfc_coal",
     }
     col_map = {k: v for k, v in col_map.items() if k is not None}
     df = df.rename(columns=col_map)
+
+    # ── Konversi satuan otomatis ────────────────────────────────────────────
+    # Produksi: kWh → MWh (÷1000) jika format user pakai kWh
+    if _prod_is_kwh and "produksi" in df.columns:
+        df["produksi"] = df["produksi"] / 1000.0
+
+    # ── Hitung Stok Akhir jika kolom formula belum terhitung (None/NaN) ─────
+    # Terjadi saat Excel dibaca tanpa Excel engine yang bisa eval formula
+    # Rumus: Stok Akhir = Stok Awal + Penerimaan - Konsumsi
+    for fuel, sa, se, rcv, con in [
+        ("coal", "coal_stok_awal", "coal_stok_akhir", "coal_rcv", "coal_con"),
+        ("hsd",  "hsd_stok_awal",  "hsd_stok_akhir",  "hsd_rcv",  "hsd_con"),
+        ("bio",  "bio_stok_awal",  "bio_stok_akhir",  "bio_rcv",  "bio_con"),
+    ]:
+        if se not in df.columns:
+            df[se] = 0.0
+        # Cek apakah stok akhir semua kosong/NaN
+        if df[se].apply(_safe).sum() == 0 and sa in df.columns:
+            # Hitung rolling stok akhir per unit
+            unit_col_name = "unit" if "unit" in df.columns else None
+            units = df[unit_col_name].dropna().unique() if unit_col_name else [None]
+            for uid in units:
+                mask = (df[unit_col_name] == uid) if unit_col_name else pd.Series([True]*len(df), index=df.index)
+                idx_list = df[mask].index.tolist()
+                if not idx_list: continue
+                stk = _safe(df.loc[idx_list[0], sa])  # stok awal baris pertama
+                for i, row_idx in enumerate(idx_list):
+                    rcv_val = _safe(df.loc[row_idx, rcv]) if rcv in df.columns else 0
+                    con_val = _safe(df.loc[row_idx, con]) if con in df.columns else 0
+                    stk_awal_row = _safe(df.loc[row_idx, sa]) if i == 0 else stk
+                    stk = stk_awal_row + rcv_val - con_val
+                    df.loc[row_idx, se] = round(stk, 3)
+                    if i < len(idx_list) - 1:
+                        # Update stok awal baris berikutnya
+                        next_idx = idx_list[i+1]
+                        df.loc[next_idx, sa] = round(stk, 3)
+
+    # Stok awal Format B: hitung dari stok akhir + konsumsi - penerimaan
+    # Dijalankan setelah rename & numeric conversion selesai
+    for fuel in ["coal", "hsd", "bio"]:
+        sa = f"{fuel}_stok_awal"
+        se = f"{fuel}_stok_akhir"
+        con = f"{fuel}_con"
+        rcv = f"{fuel}_rcv"
+        # Hanya proses jika stok_awal belum ada atau semua 0
+        if se in df.columns and (sa not in df.columns or df[sa].fillna(0).sum() == 0):
+            if sa not in df.columns:
+                df[sa] = 0.0
+            # Hitung per unit
+            unit_col_name = "unit" if "unit" in df.columns else None
+            units = df[unit_col_name].dropna().unique() if unit_col_name else [None]
+            for uid in units:
+                if uid is None:
+                    mask = pd.Series([True] * len(df), index=df.index)
+                else:
+                    mask = df[unit_col_name] == uid
+                idx = df[mask].index.tolist()
+                if not idx: continue
+                stk  = df.loc[idx, se].apply(_safe).values
+                kon_ = df.loc[idx, con].apply(_safe).values if con in df.columns else np.zeros(len(idx))
+                rcv_ = df.loc[idx, rcv].apply(_safe).values if rcv in df.columns else np.zeros(len(idx))
+                # Stok awal hari-1 = stok_akhir[0] + konsumsi[0] - penerimaan[0]
+                # Stok awal hari-n = stok_akhir[n-1]
+                awal = np.concatenate([[stk[0] + kon_[0] - rcv_[0]], stk[:-1]])
+                df.loc[idx, sa] = awal
 
     # Pastikan kolom standar ada meski kosong
     for col in ["tanggal","unit","coal_rcv","coal_con","coal_stok_awal","coal_stok_akhir",
@@ -288,7 +385,19 @@ def summary_stok(df: pd.DataFrame, unit_filter="Semua") -> dict:
         return {}
 
     def _stok_summary(rcv_col, con_col, sa_col, se_col, unit_label):
-        stok_awal  = _safe(d[sa_col].dropna().iloc[0]) if d[sa_col].dropna().any() else 0
+        # Stok awal = jumlah stok awal tiap unit di hari pertama
+        # (baris pertama per unit, bukan baris pertama df saja)
+        if sa_col in d.columns and d[sa_col].dropna().any():
+            if "unit" in d.columns and unit_filter == "Semua":
+                stok_awal = sum(
+                    _safe(d[d["unit"]==u][sa_col].dropna().iloc[0])
+                    for u in d["unit"].dropna().unique()
+                    if not d[d["unit"]==u][sa_col].dropna().empty
+                )
+            else:
+                stok_awal = _safe(d[sa_col].dropna().iloc[0])
+        else:
+            stok_awal = 0
         total_rcv  = d[rcv_col].apply(_safe).sum()
         total_con  = d[con_col].apply(_safe).sum()
         stok_akhir = _safe(d[se_col].dropna().iloc[-1]) if d[se_col].dropna().any() else (stok_awal + total_rcv - total_con)
