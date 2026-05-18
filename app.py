@@ -1,7 +1,8 @@
 """
 app.py — Dashboard Monitoring Energi Primer PLTU v2
 """
-import streamlit as st, pandas as pd, numpy as np
+import streamlit as st
+import pandas as pd, pandas as pd, numpy as np
 import plotly.express as px, plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
@@ -313,7 +314,9 @@ elif page=="🔮 Prognosa":
     fp.add_trace(go.Scatter(x=df_tr["tanggal"],y=df_tr["coal_stok_akhir"],mode="lines",name="Realisasi",line=dict(color="#2C2C2C",width=2)))
     fp.add_trace(go.Scatter(x=pdates,y=pstoks,mode="lines+markers",name="Proyeksi",line=dict(color="#F9A825",width=2,dash="dash"),marker=dict(size=5,symbol="circle-open")))
     fp.add_hline(y=5000,line_dash="dot",line_color="#C62828",annotation_text="Min 5.000 ton")
-    fp.add_vline(x=str(today),line_dash="dash",line_color="#9CA3AF",annotation_text="Hari ini")
+    # add_vline di plotly baru butuh timestamp dalam milidetik untuk axis datetime
+    today_ts = int(pd.Timestamp(today).timestamp() * 1000)
+    fp.add_vline(x=today_ts,line_dash="dash",line_color="#9CA3AF",annotation_text="Hari ini")
     fp.update_layout(height=280,margin=dict(t=10,b=5,l=5,r=5),paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",legend=dict(orientation="h",y=1.12))
     st.plotly_chart(fp,use_container_width=True)
 
