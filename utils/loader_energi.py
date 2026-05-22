@@ -265,6 +265,14 @@ def tren_harian(df: pd.DataFrame, unit_filter="Semua") -> pd.DataFrame:
         u = int(str(unit_filter).replace("Unit","").strip())
         d = d[d["unit"] == u]
 
+    if "tanggal" not in d.columns or d.empty:
+        return pd.DataFrame()
+    # Pastikan kolom numerik ada semua
+    for _col in ["coal_con","hsd_con","bio_con","coal_rcv","hsd_rcv","bio_rcv",
+                 "coal_stok_akhir","hsd_stok_akhir","bio_stok_akhir",
+                 "produksi","heat_rate","sfc_coal","gcv"]:
+        if _col not in d.columns:
+            d[_col] = 0.0
     grp = d.groupby("tanggal").agg(
         coal_con    =("coal_con",    "sum"),
         hsd_con     =("hsd_con",     "sum"),
@@ -394,7 +402,7 @@ def summary_stok(df: pd.DataFrame, unit_filter="Semua") -> dict:
         return {}
 
     hasil = {}
-    tren = tren_harian(d, unit=0)
+    tren = tren_harian(d, unit_filter="Semua")
 
     for fuel, sa, se, rcv, con, min_stok, satuan in [
         ("coal", "coal_stok_awal", "coal_stok_akhir", "coal_rcv", "coal_con", 5000, "MT"),
