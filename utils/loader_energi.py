@@ -130,9 +130,16 @@ def load_harian(src=None) -> pd.DataFrame:
     df = df.rename(columns=col_map)
 
     # ── Konversi satuan otomatis ────────────────────────────────────────────
-    # Produksi: kWh → MWh (÷1000) jika format user pakai kWh
+    # Produksi: kWh → MWh (÷1000)
     if _prod_is_kwh and "produksi" in df.columns:
-        df["produksi"] = df["produksi"] / 1000.0
+        df["produksi"] = pd.to_numeric(df["produksi"], errors="coerce").fillna(0) / 1000.0
+
+    # HSD: Liter → kL (÷1000) jika kolom header pakai satuan (L)
+    # Contoh: 10.760 L = 10.76 kL, konsumsi 2.890 L = 2.89 kL
+    if _hsd_is_liter:
+        for col in ["hsd_rcv", "hsd_con", "hsd_stok_awal", "hsd_stok_akhir"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0) / 1000.0
 
     # ── Hitung Stok Akhir jika kolom formula belum terhitung (None/NaN) ─────
     # Terjadi saat Excel dibaca tanpa Excel engine yang bisa eval formula
@@ -369,12 +376,14 @@ def prognosa(df: pd.DataFrame, unit_filter="Semua") -> dict:
 # ════════════════════════════════════════════════════════════════════════════
 def summary_stok(df: pd.DataFrame, unit_filter="Semua") -> dict:
     """
-    Rekap stok periode data:
-      stok_awal    = stok awal baris pertama
-      total_rcv    = total penerimaan
-      total_con    = total konsumsi
-      stok_akhir   = stok akhir baris terakhir
-      hari_pakai   = proyeksi sisa hari berdasarkan avg konsumsi 7 hari
+    Rekap stok per bahan bakar:
+      stok_awal    = total stok awal hari pertama (Unit 1 + Unit 2)
+      total_rcv    = total penerimaan periode
+      total_con    = total konsumsi periode
+      stok_akhir   = total stok akhir hari terakhir
+      avg_con_hari = rata-rata konsumsi per hari
+      hari_pakai   = estimasi hari bertahan (stok_akhir / avg_con_hari)
+      status       = 🟢 AMAN / 🟡 WASPADA / 🔴 KRITIS
     """
     d = df.copy()
     if unit_filter != "Semua":
@@ -384,45 +393,77 @@ def summary_stok(df: pd.DataFrame, unit_filter="Semua") -> dict:
     if d.empty:
         return {}
 
-    def _stok_summary(rcv_col, con_col, sa_col, se_col, unit_label):
-        # Stok awal = jumlah stok awal tiap unit di hari pertama
-        # (baris pertama per unit, bukan baris pertama df saja)
-        if sa_col in d.columns and d[sa_col].dropna().any():
+    hasil = {}
+    tren = tren_harian(d, unit=0)
+
+    for fuel, sa, se, rcv, con, min_stok, satuan in [
+        ("coal", "coal_stok_awal", "coal_stok_akhir", "coal_rcv", "coal_con", 5000, "MT"),
+        ("hsd",  "hsd_stok_awal",  "hsd_stok_akhir",  "hsd_rcv",  "hsd_con",   10, "kL"),
+        ("bio",  "bio_stok_awal",  "bio_stok_akhir",  "bio_rcv",  "bio_con",    50, "ton"),
+    ]:
+        # Stok awal = jumlah stok awal baris pertama per unit
+        if sa in d.columns and d[sa].apply(_safe).sum() > 0:
             if "unit" in d.columns and unit_filter == "Semua":
                 stok_awal = sum(
-                    _safe(d[d["unit"]==u][sa_col].dropna().iloc[0])
+                    _safe(d[d["unit"]==u][sa].dropna().iloc[0])
                     for u in d["unit"].dropna().unique()
-                    if not d[d["unit"]==u][sa_col].dropna().empty
+                    if not d[d["unit"]==u][sa].dropna().empty
                 )
             else:
-                stok_awal = _safe(d[sa_col].dropna().iloc[0])
+                stok_awal = _safe(d[sa].dropna().iloc[0])
         else:
-            stok_awal = 0
-        total_rcv  = d[rcv_col].apply(_safe).sum()
-        total_con  = d[con_col].apply(_safe).sum()
-        stok_akhir = _safe(d[se_col].dropna().iloc[-1]) if d[se_col].dropna().any() else (stok_awal + total_rcv - total_con)
-        avg7       = d[con_col].apply(_safe).tail(7).mean()
-        hari_pakai = round(stok_akhir / avg7, 1) if avg7 > 0 else 0
+            stok_awal = 0.0
 
-        return {
-            "stok_awal":  stok_awal,
-            "total_rcv":  total_rcv,
-            "total_con":  total_con,
-            "stok_akhir": stok_akhir,
-            "avg_harian": round(avg7, 2),
-            "hari_pakai": hari_pakai,
+        # Total penerimaan & konsumsi
+        total_rcv = d[rcv].apply(_safe).sum() if rcv in d.columns else 0
+        total_con = d[con].apply(_safe).sum() if con in d.columns else 0
+
+        # Stok akhir = jumlah stok akhir baris terakhir per unit
+        if se in d.columns and d[se].apply(_safe).sum() != 0:
+            if "unit" in d.columns and unit_filter == "Semua":
+                stok_akhir = sum(
+                    _safe(d[d["unit"]==u][se].dropna().iloc[-1])
+                    for u in d["unit"].dropna().unique()
+                    if not d[d["unit"]==u][se].dropna().empty
+                )
+            else:
+                stok_akhir = _safe(d[se].dropna().iloc[-1])
+        else:
+            # Hitung dari stok awal + rcv - con
+            stok_akhir = stok_awal + total_rcv - total_con
+
+        # Avg konsumsi per hari (dari tren)
+        avg_con = float(tren[con].mean()) if con in tren.columns and tren[con].mean() > 0 else (
+                  total_con / max(len(tren), 1))
+
+        # Estimasi hari bertahan
+        hari_pakai = round(stok_akhir / avg_con, 1) if avg_con > 0 else 0
+
+        # Status
+        if stok_akhir <= 0:
+            status = "🔴 KRITIS"
+        elif stok_akhir < min_stok:
+            status = "🟡 WASPADA"
+        elif stok_akhir < min_stok * 1.5:
+            status = "🟡 MENDEKATI MINIMUM"
+        else:
+            status = "🟢 AMAN"
+
+        hasil[fuel] = {
+            "stok_awal":   round(stok_awal, 2),
+            "total_rcv":   round(total_rcv, 2),
+            "total_con":   round(total_con, 2),
+            "stok_akhir":  round(stok_akhir, 2),
+            "avg_con_hari":round(avg_con, 2),
+            "hari_pakai":  hari_pakai,
+            "status":      status,
+            "satuan":      satuan,
+            "min_stok":    min_stok,
         }
 
-    return {
-        "coal": _stok_summary("coal_rcv","coal_con","coal_stok_awal","coal_stok_akhir","ton"),
-        "hsd":  _stok_summary("hsd_rcv", "hsd_con", "hsd_stok_awal", "hsd_stok_akhir","kL"),
-        "bio":  _stok_summary("bio_rcv",  "bio_con", "bio_stok_awal", "bio_stok_akhir","ton"),
-    }
+    return hasil
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# HELPER: KPI OVERVIEW
-# ════════════════════════════════════════════════════════════════════════════
 def kpi_overview(df: pd.DataFrame, unit_filter="Semua") -> dict:
     d = df.copy()
     if unit_filter != "Semua":
