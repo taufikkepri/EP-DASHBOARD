@@ -339,7 +339,7 @@ elif page=="📦 Stok":
               <div class="sr"><span>Total Penerimaan</span><span>{s['total_rcv']:,.1f} {funit}</span></div>
               <div class="sr"><span>Total Konsumsi</span><span>{s['total_con']:,.1f} {funit}</span></div>
               <div class="sr"><span>Stok Akhir</span><span><b>{s['stok_akhir']:,.1f} {funit}</b></span></div>
-              <div class="sr"><span>Avg konsumsi/hari</span><span>{s['avg_harian']:,.2f} {funit}</span></div>
+              <div class="sr"><span>Avg konsumsi/hari</span><span>{s['avg_con_hari']:,.2f} {funit}</span></div>
               <div class="sr"><span>Estimasi hari pakai</span><span><span class="{hc}">{hp:.0f} hari</span></span></div>
             </div>""",unsafe_allow_html=True)
         with cc:
