@@ -98,7 +98,7 @@ if page=="📊 Overview":
 
     # ── Tren konsumsi harian — pisah Unit 1 & 2 ───────────────────────────
     st.markdown('<div class="sec">Konsumsi Coal & Biomassa Harian — Unit 1 vs Unit 2</div>',unsafe_allow_html=True)
-    df_u1=tren_harian(df_h,1); df_u2=tren_harian(df_h,2)
+    df_u1=tren_harian(df_h, unit_filter="Unit 1"); df_u2=tren_harian(df_h, unit_filter="Unit 2")
     fig_con=make_subplots(rows=1,cols=2,
                           subplot_titles=("Unit 1","Unit 2"),
                           shared_yaxes=True)
